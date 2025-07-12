@@ -264,5 +264,61 @@ namespace Rws.LC.AppBlueprint.Services
             //how to send an error exemple:
             //throw new SetupValidationException(ErrorMessages.InvalidSetupMessage, new Details[] { });
         }
+
+        /// <inheritdoc/>
+        public async Task<IntegrationCredentialsModel> GetIntegrationCredentials()
+        {
+            // Get the app registration info (contains ClientId, ClientSecret, TenantId)
+            var appRegistration = await _appRegistrationRepository.GetRegistrationInfo().ConfigureAwait(false);
+
+            if (appRegistration == null)
+            {
+                throw new RegistrationNotFoundException("No app registration found", "");
+            }
+
+            // Get the account info for the tenant (contains Region and any configuration like webhook)
+            var accountInfo = await _repository.GetAccountInfoByTenantId(appRegistration.TenantId).ConfigureAwait(false);
+
+            // Look for webhook in the configuration values
+            string webhookUrl = null;
+            if (accountInfo?.ConfigurationValues != null)
+            {
+                var webhookConfig = accountInfo.ConfigurationValues.FirstOrDefault(c => c.Id == "WEBHOOK_URL");
+                webhookUrl = webhookConfig?.Value?.ToString();
+            }
+
+            return new IntegrationCredentialsModel
+            {
+                ClientId = appRegistration.ClientCredentials?.ClientId,
+                ClientSecret = appRegistration.ClientCredentials?.ClientSecret,
+                TenantId = appRegistration.TenantId,
+                Region = accountInfo?.Region,
+                WebhookUrl = webhookUrl
+            };
+        }
+
+        /// <inheritdoc/>
+        public async Task SaveWebhookUrl(string tenantId, string webhookUrl, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(webhookUrl))
+            {
+                throw new AppValidationException($"Invalid webhook URL provided.",
+                    new Details { Code = ErrorCodes.InvalidInput, Name = "webhookUrl", Value = webhookUrl });
+            }
+
+            // Use the existing configuration system to store the webhook
+            var webhookConfig = new List<ConfigurationValueModel>
+            {
+                new ConfigurationValueModel
+                {
+                    Id = "WEBHOOK_URL",
+                    Value = webhookUrl
+                }
+            };
+
+            await SaveOrUpdateConfigurationSettings(tenantId, webhookConfig, cancellationToken).ConfigureAwait(false);
+        }
+
+
     }
 }

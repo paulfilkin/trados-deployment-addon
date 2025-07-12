@@ -79,5 +79,20 @@ namespace Rws.LC.AppBlueprint.Interfaces
         /// <param name="tenantId">The tenant id.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         Task ValidateConfigurationSettings(string tenantId, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Gets the stored Trados Cloud credentials for integration purposes.
+        /// </summary>
+        /// <returns>The credential info including ClientId, ClientSecret, TenantId and webhook</returns>
+        Task<IntegrationCredentialsModel> GetIntegrationCredentials();
+
+        /// <summary>
+        /// Saves the webhook URL for integration.
+        /// </summary>
+        /// <param name="tenantId">The tenant identifier.</param>
+        /// <param name="webhookUrl">The webhook URL.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        Task SaveWebhookUrl(string tenantId, string webhookUrl, CancellationToken cancellationToken);
+
     }
 }
