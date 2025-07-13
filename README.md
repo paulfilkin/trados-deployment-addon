@@ -359,7 +359,6 @@ Are welcome.
 
 ## Resources
 
-- [Trados Cloud Extensibility Documentation](https://docs.rws.com/trados-cloud)
-- [Addon Development Guide](https://docs.rws.com/trados-cloud/extensibility)
+- [Trados Cloud Extensibility Documentation](https://eu.cloud.trados.com/lc/extensibility-docs)
 - [HMAC Authentication Best Practices](https://tools.ietf.org/html/rfc2104)
 
