@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -172,6 +173,7 @@ namespace Rws.LC.AppBlueprint.Controllers
                     await _accountService.ValidateLifecycleEvent(devTenantId, appId);
                     AppLifecycleEvent<InstalledEvent> installedEvent = JsonSerializer.Deserialize<AppLifecycleEvent<InstalledEvent>>(payload, JsonSettings.Default());
                     await _accountService.SaveAccountInfo(tenantId, installedEvent.Data.Region, CancellationToken.None).ConfigureAwait(true);
+
                     break;
                 case AppLifecycleEventEnum.UNREGISTERED:
                     // This is the event notifying that the App has been unregistered/deleted from Language Cloud.
@@ -185,10 +187,20 @@ namespace Rws.LC.AppBlueprint.Controllers
                     break;
 
                 case AppLifecycleEventEnum.UNINSTALLED:
-                    // This is the event notifying that the App has been uninstalled from a tenant account.
-                    // No further details are available for that event.
                     _logger.LogInformation("App Uninstalled Event Received.");
                     await _accountService.ValidateLifecycleEvent(devTenantId, appId);
+
+                    // NOTIFY PHP SYSTEM ABOUT UNINSTALL
+                    try
+                    {
+                        await NotifyUninstallAsync(tenantId);
+                        _logger.LogInformation("Uninstall notification sent successfully for tenant {TenantId}", tenantId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to notify uninstall for tenant {TenantId}: {Error}", tenantId, ex.Message);
+                    }
+
                     await _accountService.RemoveAccountInfo(tenantId, CancellationToken.None).ConfigureAwait(true);
                     break;
             }
@@ -239,11 +251,23 @@ namespace Rws.LC.AppBlueprint.Controllers
         [HttpPost("configuration/validation")]
         public async Task<IActionResult> ValidateConfiguration()
         {
-
             _logger.LogInformation("Validating the configuration settings.");
 
             var tenantId = HttpContext.User?.GetTenantId();
             await _accountService.ValidateConfigurationSettings(tenantId, CancellationToken.None).ConfigureAwait(true);
+
+            // ADD AUTOMATIC INTEGRATION SETUP HERE
+            _logger.LogInformation("Starting automatic integration setup for tenant {TenantId}", tenantId);
+            try
+            {
+                await SetupIntegrationAsync(tenantId);
+                _logger.LogInformation("Integration setup completed successfully for tenant {TenantId}", tenantId);
+            }
+            catch (Exception integrationEx)
+            {
+                _logger.LogError(integrationEx, "Integration setup failed for tenant {TenantId}: {Error}", tenantId, integrationEx.Message);
+                // Don't fail the validation if integration setup fails
+            }
 
             return Ok();
         }
@@ -268,6 +292,283 @@ namespace Rws.LC.AppBlueprint.Controllers
         {
             var html = System.IO.File.ReadAllText(@"./resources/termsAndConditions.html");
             return base.Content(html, "text/html");
+        }
+        /// <summary>
+        /// Automatically sets up integration with external provisioning system
+        /// </summary>
+        /// <param name="tenantId">The tenant ID for the installation</param>
+        private async Task SetupIntegrationAsync(string tenantId)
+        {
+            _logger.LogInformation("Setting up integration for tenant {TenantId}", tenantId);
+
+            // Get stored credentials for this installation
+            var credentials = await _accountService.GetIntegrationCredentials().ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(credentials.ClientId) || string.IsNullOrEmpty(credentials.ClientSecret))
+            {
+                throw new InvalidOperationException("Missing required Trados credentials for integration setup");
+            }
+
+            // Prepare provisioning request
+            var provisioningData = new
+            {
+                tenantId = tenantId,  // ← CORRECT: matches PHP expectation
+                clientCredentials = new
+                {
+                    clientId = credentials.ClientId,
+                    clientSecret = credentials.ClientSecret
+                },
+                eventType = "INSTALLED",
+                configurationData = new { },
+                webhook_endpoint = "/webhook/trados",
+                integration_type = "deployment_production",
+                source_addon = "trados-deployment-addon",
+                auto_provisioned = true,
+                provisioned_at = DateTime.UtcNow.ToString("O")
+            };
+
+            // Get the integration endpoint URL
+            string integrationUrl = _configuration.GetValue<string>("integrationEndpoint") ??
+                                  "https://api.filkin.com/trados-integration/provision-instance";
+
+            _logger.LogInformation("Calling integration endpoint: {Url}", integrationUrl);
+
+            // Send HMAC-signed request
+            var result = await SendHmacSignedRequestAsync(integrationUrl, provisioningData);
+
+            if (result.Success)
+            {
+                _logger.LogInformation("Integration provisioned successfully. Instance ID: {InstanceId}", result.InstanceId);
+
+                // Optionally save the webhook URL if returned
+                if (!string.IsNullOrEmpty(result.WebhookUrl))
+                {
+                    await _accountService.SaveWebhookUrl(tenantId, result.WebhookUrl, CancellationToken.None).ConfigureAwait(false);
+                    _logger.LogInformation("Webhook URL saved: {WebhookUrl}", result.WebhookUrl);
+                }
+            }
+            else
+            {
+                throw new InvalidOperationException($"Integration setup failed: {result.Error}");
+            }
+        }
+
+        /// <summary>
+        /// Sends HMAC-signed request to external provisioning system
+        /// </summary>
+        private async Task<IntegrationResult> SendHmacSignedRequestAsync(string url, object data)
+        {
+            using var httpClient = new HttpClient();
+
+            var payload = JsonSerializer.Serialize(data, JsonSettings.Default());
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var nonce = Guid.NewGuid().ToString("N")[..16]; // First 16 chars of GUID
+
+            // Get API key from tenant configuration instead of hardcoded secret
+            var tenantId = HttpContext.User?.GetTenantId();
+            var apiKey = await GetTenantApiKey(tenantId);
+
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                throw new InvalidOperationException("API Key not configured. Please configure the API Key in the addon settings.");
+            }
+
+            // Create HMAC signature using the configured API key
+            var signatureData = payload + timestamp + nonce;
+            var signature = CreateHmacSignature(signatureData, apiKey);
+
+            _logger.LogInformation("Sending HMAC request to {Url} with API key configured", url);
+
+            var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json")
+            };
+
+            request.Headers.Add("X-Signature", signature);
+            request.Headers.Add("X-Timestamp", timestamp.ToString());
+            request.Headers.Add("X-Nonce", nonce);
+
+            var response = await httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("Integration API response: {StatusCode} - {Content}",
+                response.StatusCode, responseContent);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = JsonSerializer.Deserialize<JsonDocument>(responseContent, JsonSettings.Default());
+                var root = result.RootElement;
+
+                return new IntegrationResult
+                {
+                    Success = root.GetProperty("success").GetBoolean(),
+                    InstanceId = root.TryGetProperty("instance_id", out var instanceId) ? instanceId.GetString() : null,
+                    WebhookUrl = root.TryGetProperty("webhook_config", out var webhookConfig) &&
+                               webhookConfig.TryGetProperty("webhook_url", out var webhookUrl) ?
+                               webhookUrl.GetString() : null,
+                    Error = root.TryGetProperty("error", out var error) ? error.GetString() : null
+                };
+            }
+            else
+            {
+                return new IntegrationResult
+                {
+                    Success = false,
+                    Error = $"HTTP {response.StatusCode}: {responseContent}"
+                };
+            }
+        }
+
+        ///// <summary>
+        ///// Gets the API key from tenant configuration
+        ///// </summary>
+        //private async Task<string> GetTenantApiKey(string tenantId)
+        //{
+        //    try
+        //    {
+        //        var configSettings = await _accountService.GetConfigurationSettings(tenantId, CancellationToken.None);
+        //        var apiKeySetting = configSettings?.Items?.FirstOrDefault(c => c.Id == "API_KEY");
+        //        return apiKeySetting?.Value?.ToString();
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        _logger.LogError(ex, "Failed to retrieve API key for tenant {TenantId}", tenantId);
+        //        return null;
+        //    }
+        //}
+
+        /// <summary>
+        /// Gets the API key from tenant configuration
+        /// </summary>
+        private async Task<string> GetTenantApiKey(string tenantId)
+        {
+            try
+            {
+                _logger.LogInformation("Attempting to get API key for tenant {TenantId}", tenantId);
+
+                var configSettings = await _accountService.GetConfigurationSettings(tenantId, CancellationToken.None);
+
+                _logger.LogInformation("Config settings retrieved. ItemCount: {Count}", configSettings?.ItemCount ?? 0);
+
+                if (configSettings?.Items != null)
+                {
+                    foreach (var item in configSettings.Items)
+                    {
+                        _logger.LogInformation("Config item: Id={Id}, Value={Value}", item.Id, item.Value?.ToString()?.Substring(0, Math.Min(10, item.Value?.ToString()?.Length ?? 0)) + "...");
+                    }
+                }
+
+                var apiKeySetting = configSettings?.Items?.FirstOrDefault(c => c.Id == "API_KEY");
+                var apiKey = apiKeySetting?.Value?.ToString();
+
+                _logger.LogInformation("API key found: {Found}, Value length: {Length}",
+                    !string.IsNullOrEmpty(apiKey), apiKey?.Length ?? 0);
+
+                return apiKey;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to retrieve API key for tenant {TenantId}", tenantId);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates HMAC-SHA256 signature
+        /// </summary>
+        private static string CreateHmacSignature(string data, string secret)
+        {
+            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secret));
+            var hash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(data));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// Notifies the PHP system about addon uninstall
+        /// </summary>
+        private async Task NotifyUninstallAsync(string tenantId)
+        {
+            // Get stored credentials for the uninstall notification
+            var credentials = await _accountService.GetIntegrationCredentials().ConfigureAwait(false);
+
+            var provisioningData = new
+            {
+                tenantId = tenantId,
+                clientCredentials = new
+                {
+                    clientId = credentials.ClientId ?? "uninstall_placeholder",
+                    clientSecret = credentials.ClientSecret ?? "uninstall_placeholder"
+                },
+                eventType = "UNINSTALLED",
+                timestamp = DateTime.UtcNow.ToString("O")
+            };
+
+            string integrationUrl = _configuration.GetValue<string>("integrationEndpoint") ??
+                                  "https://api.filkin.com/trados-integration/provision-instance";
+
+            _logger.LogInformation("Sending uninstall notification to: {Url}", integrationUrl);
+
+            await SendUninstallRequestAsync(integrationUrl, provisioningData);
+        }
+
+        /// <summary>
+        /// Sends uninstall request with HMAC authentication
+        /// </summary>
+        private async Task SendUninstallRequestAsync(string url, object data)
+        {
+            using var httpClient = new HttpClient();
+            var payload = JsonSerializer.Serialize(data, JsonSettings.Default());
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var nonce = Guid.NewGuid().ToString("N")[..16]; // First 16 chars of GUID
+
+            // Get API key for HMAC signing (we still have it during uninstall)
+            var tenantId = HttpContext.User?.GetTenantId();
+            var apiKey = await GetTenantApiKey(tenantId);
+
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                // Fallback: try to get API key from the database before removal
+                _logger.LogWarning("No API key in configuration during uninstall, attempting database lookup");
+                // For now, we'll throw an error - we need the API key for security
+                throw new InvalidOperationException("Cannot authenticate uninstall request - API key not available");
+            }
+
+            // Create HMAC signature using the API key
+            var signatureData = payload + timestamp + nonce;
+            var signature = CreateHmacSignature(signatureData, apiKey);
+
+            _logger.LogInformation("Sending HMAC-authenticated uninstall request");
+
+            var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json")
+            };
+
+            request.Headers.Add("X-Signature", signature);
+            request.Headers.Add("X-Timestamp", timestamp.ToString());
+            request.Headers.Add("X-Nonce", nonce);
+
+            var response = await httpClient.SendAsync(request);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("Uninstall API response: {StatusCode} - {Content}",
+                response.StatusCode, responseContent);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException($"Uninstall notification failed: HTTP {response.StatusCode}: {responseContent}");
+            }
+        }
+
+        /// <summary>
+        /// Result of integration setup
+        /// </summary>
+        private class IntegrationResult
+        {
+            public bool Success { get; set; }
+            public string InstanceId { get; set; }
+            public string WebhookUrl { get; set; }
+            public string Error { get; set; }
         }
     }
 }

@@ -45,6 +45,9 @@ namespace Rws.LC.AppBlueprint
             services.AddSingleton<IAppRegistrationRepository, AppRegistrationRepository>();
             services.AddSingleton<IDescriptorService, DescriptorService>();
             services.AddSingleton<IAccountService, AccountService>();
+            // Add HttpClient for test website proxy
+            services.AddHttpClient();
+
 
             // this ensures that the services are started and stopped concurrently
             services.Configure<HostOptions>(options =>

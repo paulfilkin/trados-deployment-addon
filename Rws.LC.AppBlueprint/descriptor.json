@@ -1,6 +1,6 @@
 ﻿{
   "name": "Trados Deployment Addon",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Trados Deployment Addon for testing deployment and credential management",
   "extensions": [],
   "standardEndpoints": {
@@ -14,16 +14,17 @@
   },
   "configurations": [
     {
-      "name": "Webhook URL",
-      "id": "WEBHOOK_URL",
-      "description": "The webhook URL for integration callbacks",
-      "optional": true,
+      "name": "API Key",
+      "id": "API_KEY",
+      "description": "The API key provided by your integration provider for secure authentication",
+      "optional": false,
       "dataType": "string",
-      "defaultValue": ""
+      "defaultValue": "",
+      "isSecret": true
     }
   ],
   "releaseNotes": "Initial deployment test version",
-  "minimumVersion": "1.0.0",
+  "minimumVersion": "1.0.1",
   "vendor": {
     "name": "Paul Filkin",
     "url": "https://multifarious.filkin.com",
