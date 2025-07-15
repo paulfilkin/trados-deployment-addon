@@ -1,12 +1,16 @@
 # Trados Cloud Integration Reference Implementation
 
-A reference implementation demonstrating secure integration patterns between Trados Cloud addons and external systems using HMAC-SHA256 authentication. This project serves as a simple example for developers building integrations with Trados Cloud.
+A reference implementation demonstrating secure integration patterns between Trados Cloud addons and external systems using JWS (JSON Web Signature) authentication. This project intends to serve as a practical example for developers building integrations with Trados Cloud.
+
+<u>**Important Note:**</u>
+
+This readme and code in addition to the blueprint was entirely generated with the use of Claude AI.  The skill and capability of the RWS developers who put this entire platform together cannot be underestimated and they deserve a lot of credit for the work and skills involved.  After working on this with the help of Claude I can only dream of having the level of expertise involved!
 
 ## Overview
 
 This reference implementation demonstrates:
-- **HMAC Authentication Patterns** with timestamp-based replay protection
-- **Multi-tenant Integration Architecture** with API key management
+- **JWS Authentication Patterns** with cryptographic signature validation
+- **Multi-tenant Integration Architecture** with automatic provisioning
 - **Addon Lifecycle Handling** for install/uninstall operations
 - **Real-time Monitoring Dashboard** for development and testing
 - **Security Best Practices** for Trados Cloud integrations
@@ -15,16 +19,14 @@ This reference implementation demonstrates:
 
 This repository provides a working reference for developers who need to:
 - Build secure integrations with Trados Cloud addons
-- Implement HMAC-SHA256 authentication patterns
-- Handle multi-tenant scenarios with proper isolation
+- Implement JWS (JSON Web Signature) authentication patterns
+- Handle multi-tenant scenarios with automatic provisioning
 - Understand Trados Cloud addon lifecycle events
 - See practical examples of integration monitoring and management
 
 ## Architecture Overview
 
-## Architecture Overview
-
-This reference implementation demonstrates a complete HMAC-authenticated integration flow between a Trados Cloud addon and an external provisioning system.
+This reference implementation demonstrates a complete JWS-authenticated integration flow between a Trados Cloud addon and an external system.
 
 ```mermaid
 sequenceDiagram
@@ -32,42 +34,39 @@ sequenceDiagram
     participant TC as Trados Cloud
     participant App as Trados App
     participant Dashboard as Integration Dashboard
-    participant API as Provisioning API
+    participant API as Integration API
     participant DB as Database
+    participant JWKS as Trados JWKS Endpoint
     
     rect rgb(240, 248, 255)
-        Note over Admin,Dashboard: Setup Phase
+        Note over Admin,Dashboard: Setup Phase (No Configuration Required)
         Admin->>Dashboard: 1. Visit integration dashboard
-        Dashboard->>DB: Generate unique API key
-        Dashboard->>Admin: Display API key for copy
-        Note right of Dashboard: Each customer gets their own<br/>unique API key for security
+        Note right of Dashboard: No API key setup needed<br/>JWS handles all authentication
     end
     
     rect rgb(245, 255, 245)
-        Note over Admin,API: Integration Setup (HMAC Auth)
+        Note over Admin,API: Integration Setup (JWS Auth)
         Admin->>TC: 2. Install Trados addon
-        Admin->>App: 3. Enter API key during installation
-        App->>App: Store API key in configuration
-        Note over TC,App: Configuration validation triggers integration
-        App->>App: Generate timestamp and nonce
-        App->>App: Create HMAC signature
-        Note right of App: HMAC-SHA256(payload + timestamp + nonce, customer_api_key)
-        App->>API: 4. Call provisioning API with HMAC headers
-        Note over App,API: Headers: X-Signature, X-Timestamp, X-Nonce<br/>Body: tenant_id, trados_credentials
-        API->>API: Validate timestamp (prevent replay attacks)
-        API->>DB: Retrieve customer's API key
-        API->>API: Recreate HMAC with stored customer API key
-        API->>API: Compare signatures
+        Note over TC,App: No user configuration required<br/>JWS authentication is automatic
+        TC->>App: 3. Send INSTALLED lifecycle event
+        TC->>TC: Generate JWS token with private key
+        TC->>App: Include JWS token in x-lc-signature header
+        App->>JWKS: 4. Fetch Trados public keys
+        JWKS->>App: Return JWK Set for signature validation
+        App->>App: Validate JWS signature using public key
+        App->>App: Verify JWS claims (iss, aud, exp, iat)
         
-        alt Valid HMAC Signature
-            API->>DB: 5. Create integration instance record
+        alt Valid JWS Signature
+            App->>API: 5. Forward validated request to provisioning
+            API->>DB: Create integration instance record
             API->>Dashboard: Update real-time dashboard
             API->>App: 6. Return success response
-            Note right of API: Integration successfully provisioned
-        else Invalid Signature
-            API->>App: Return 401 Unauthorized
-            Note right of API: Log security violation
-            App->>Admin: Display error message
+            App->>TC: Return success to Trados
+            Note right of API: Integration automatically provisioned
+        else Invalid JWS Signature
+            App->>App: Log JWS validation failure
+            App->>TC: Return 401 Unauthorized
+            Note right of App: Security validation failed
         end
     end
     
@@ -76,17 +75,38 @@ sequenceDiagram
         Admin->>Dashboard: 7. Monitor integration status
         Dashboard->>DB: Retrieve instance data and logs
         Dashboard->>Admin: Display active integrations and activity
+        Dashboard->>Admin: Show JWS validation logs and metrics
         Note right of Dashboard: Real-time monitoring of<br/>all tenant integrations
     end
     
     rect rgb(255, 248, 240)
+        Note over Admin,API: Webhook Events (JWS Authenticated)
+        TC->>App: 8. Send webhook events (PROJECT.TASK.CREATED)
+        TC->>TC: Sign webhook with JWS private key
+        TC->>App: Include JWS signature in x-lc-signature header
+        App->>JWKS: Fetch current public keys (cached)
+        App->>App: Validate JWS signature
+        App->>App: Verify webhook payload integrity
+        
+        alt Valid Webhook
+            App->>API: Process webhook event
+            API->>DB: Log webhook activity
+            API->>Dashboard: Update activity feed
+            Note right of API: Secure webhook processing
+        else Invalid Signature
+            App->>App: Log security violation
+            App->>TC: Return 401 Unauthorized
+        end
+    end
+    
+    rect rgb(255, 248, 240)
         Note over Admin,API: Uninstall Flow
-        Admin->>TC: 8. Uninstall addon
-        App->>App: Retrieve stored API key
-        App->>App: Generate HMAC signature for uninstall
-        App->>API: 9. Send UNINSTALLED event with HMAC auth
-        API->>API: Validate HMAC signature
-        API->>DB: 10. Deactivate integration instance
+        Admin->>TC: 9. Uninstall addon
+        TC->>App: Send UNINSTALLED lifecycle event
+        TC->>App: Include JWS signature
+        App->>App: Validate JWS signature
+        App->>API: 10. Send deactivation request
+        API->>DB: Deactivate integration instance
         API->>Dashboard: Update dashboard status
         Note right of API: Secure cleanup with audit trail
     end
@@ -94,31 +114,32 @@ sequenceDiagram
 
 ## Security Features
 
-### HMAC Authentication
-- **Algorithm**: HMAC-SHA256
-- **Signature**: `HMAC-SHA256(payload + timestamp + nonce, api_key)`
-- **Headers**: `X-Signature`, `X-Timestamp`, `X-Nonce`
-- **Replay Protection**: Timestamp validation prevents replay attacks
+### JWS Authentication
+- **Algorithm**: RS256 (RSA Signature with SHA-256)
+- **Signature**: Trados signs requests with private key
+- **Validation**: App validates using Trados public keys from JWKS endpoint
+- **Claims Validation**: Issuer, audience, expiration, and issued-at-time verification
+- **No User Secrets**: No API keys or secrets for users to manage
 
-### API Key Management
-- **Customer Self-Service**: Unique API keys generated per customer
-- **Secure Storage**: Keys stored in SQLite with proper isolation
-- **Rotation Support**: Easy regeneration via dashboard interface
-- **Multi-tenant**: Each customer gets their own unique key
+### Automatic Provisioning
+- **Zero Configuration**: No user setup required during addon installation
+- **Tenant Isolation**: Automatic tenant identification from JWS claims
+- **Credential Management**: Client credentials automatically provided during registration
+- **Secure by Default**: All authentication handled cryptographically
 
 ### Components
 
 1. **Trados Addon** (`Rws.LC.AppBlueprint/`)
    - C# .NET Core application
    - Handles Trados Cloud lifecycle events (install/uninstall)
-   - Implements HMAC-SHA256 request signing
-   - Manages tenant configuration and API key storage
+   - Implements JWS signature validation using RSA public keys
+   - Manages tenant provisioning automatically
 
-2. **Integration API Reference** (`provision-instance.php`)
-   - Demonstrates HMAC-signed request validation
-   - Shows multi-tenant instance management patterns
-   - Example of secure provisioning/deprovisioning logic
-   - *Note: Full dashboard implementation not included in this repository*
+2. **Integration API Reference** (`v1/` endpoints)
+   - Demonstrates JWS signature validation patterns
+   - Shows automatic tenant provisioning
+   - Example of secure webhook processing
+   - Real-time dashboard with JWS authentication logs
 
 ## Development Setup (Reference Implementation)
 
@@ -129,36 +150,30 @@ This reference implementation was developed and tested using:
 - **Visual Studio** for C# addon development
 - **Local SQLite database** for simplicity in development
 
-*Note: I haven't provided details of my code for this as the focus here is on the Trados Cloud part.*
-
 ### Repository Contents
 This repository contains:
-- Complete Trados Cloud addon implementation
-- HMAC authentication reference code
-- API endpoint examples for provisioning
-- Database schema examples
+- Complete Trados Cloud addon implementation with JWS authentication
+- JWS signature validation reference code
+- API endpoint examples for automatic provisioning
+- Database schema examples for multi-tenant data
 - Security pattern demonstrations
-
-*The complete dashboard implementation is not included - only the core integration patterns and addon code.*
-
-## Development Usage
 
 ## Using This Reference Implementation
 
 ### For Integration Developers
 
-1. **A Study Guide for one way to provide an Addon Implementation**
-   - Examine HMAC authentication patterns in `StandardController.cs`
-   - Review lifecycle event handling in `AppLifecycle()` method
-   - Understand configuration management and API key handling
+1. **JWS Authentication Patterns**
+   - Examine JWS validation in `validateJwsSignature()` function
+   - Review public key fetching from Trados JWKS endpoint
+   - Understand RSA signature verification using OpenSSL
 
-2. **How I used Security Patterns**
-   - HMAC-SHA256 signature generation and validation
-   - Timestamp-based replay attack prevention
-   - Multi-tenant API key isolation techniques
+2. **Security Implementation**
+   - Cryptographic signature validation (no shared secrets)
+   - Automatic tenant identification from JWS claims
+   - Public key caching and rotation handling
 
 3. **Adapt Integration Patterns**
-   - Modify authentication for your requirements
+   - Modify JWS validation for your requirements
    - Implement your own provisioning logic
    - Build appropriate dashboard/monitoring systems
 
@@ -167,31 +182,46 @@ This repository contains:
 1. **Addon Structure and Configuration**
    - Review `descriptor.json` for addon configuration patterns
    - Study lifecycle event handling (INSTALLED/UNINSTALLED)
-   - Learn configuration validation timing and patterns
+   - Learn automatic provisioning without user configuration
 
 2. **Security Implementation Examples**
-   - Complete HMAC authentication implementation
-   - Secure API key management patterns
-   - Multi-tenant isolation techniques
+   - Complete JWS authentication implementation
+   - Automatic tenant isolation techniques
+   - Webhook signature validation patterns
 
 ## API Endpoints
 
-### Provisioning Endpoint
+### App Lifecycle Endpoint
 ```
-POST /provision-instance.php
+POST /v1/app-lifecycle
 Content-Type: application/json
-X-Signature: <hmac_signature>
-X-Timestamp: <unix_timestamp>
-X-Nonce: <random_nonce>
+x-lc-signature: <jws_token>
 
 {
-  "tenantId": "string",
-  "clientCredentials": {
-    "clientId": "string",
-    "clientSecret": "string"
-  },
-  "eventType": "INSTALLED|UNINSTALLED",
-  "configurationData": {}
+  "timestamp": "2019-08-24T14:15:22Z",
+  "clientId": "string",
+  "clientSecret": "string",
+  "id": "INSTALLED|UNINSTALLED"
+}
+```
+
+### Webhook Endpoint
+```
+POST /v1/webhooks
+Content-Type: application/json
+x-lc-signature: <jws_token>
+
+{
+  "events": [
+    {
+      "eventType": "PROJECT.TASK.CREATED",
+      "eventData": {
+        "taskId": "string",
+        "projectId": "string",
+        "accountId": "string"
+      }
+    }
+  ]
 }
 ```
 
@@ -199,11 +229,11 @@ X-Nonce: <random_nonce>
 ```json
 {
   "success": true,
-  "instanceId": "ic_instance_12345_abcdef",
+  "instanceId": "trados_instance_12345_abcdef",
   "tenantId": "tenant_id",
   "eventType": "INSTALLED",
-  "timestamp": "2025-07-13 21:46:12",
-  "message": "Integration Control processed successfully"
+  "timestamp": "2025-07-15 12:34:56",
+  "message": "Integration processed successfully"
 }
 ```
 
@@ -212,15 +242,16 @@ X-Nonce: <random_nonce>
 ### Integration Controls
 ```sql
 CREATE TABLE integration_controls (
-    instance_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT NOT NULL UNIQUE,
     tenant_id TEXT NOT NULL,
     client_id TEXT NOT NULL,
     client_secret TEXT NOT NULL,
-    api_key TEXT,
-    status TEXT CHECK(status IN ('active', 'pending', 'error', 'inactive')),
     configuration_data TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_activity TIMESTAMP
+    status TEXT DEFAULT 'pending' CHECK(status IN ('active', 'pending', 'error', 'inactive')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_activity DATETIME,
+    metadata TEXT
 );
 ```
 
@@ -228,64 +259,86 @@ CREATE TABLE integration_controls (
 ```sql
 CREATE TABLE activity_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    level TEXT NOT NULL,
+    instance_id TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    level TEXT DEFAULT 'info' CHECK(level IN ('success', 'info', 'warning', 'error')),
     message TEXT NOT NULL,
     details TEXT,
-    instance_id TEXT
+    request_data TEXT,
+    response_data TEXT,
+    user_agent TEXT,
+    ip_address TEXT
+);
+```
+
+### Webhook Events
+```sql
+CREATE TABLE webhook_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT,
+    event_type TEXT NOT NULL,
+    payload TEXT,
+    headers TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    processed INTEGER DEFAULT 0,
+    processing_result TEXT
 );
 ```
 
 ## Security Implementation Reference
 
-### HMAC Authentication Pattern
-- **Algorithm**: HMAC-SHA256
-- **Signature**: `HMAC-SHA256(payload + timestamp + nonce, api_key)`
-- **Headers**: `X-Signature`, `X-Timestamp`, `X-Nonce`
-- **Replay Protection**: Timestamp validation prevents replay attacks
+### JWS Authentication Pattern
+- **Algorithm**: RS256 (RSA with SHA-256)
+- **Signature Source**: Trados Cloud private key
+- **Validation**: Using Trados public keys from JWKS endpoint
+- **Claims Validation**: iss, aud, exp, iat verification
+- **No Shared Secrets**: Public key cryptography eliminates secret management
 
-### API Key Management Pattern
-- **Self-Service Generation**: Unique API keys generated per integration
-- **Secure Storage**: Keys stored with proper database isolation
-- **Rotation Support**: Easy regeneration via dashboard interface
-- **Multi-tenant Isolation**: Each integration gets its own unique key
+### Automatic Tenant Provisioning
+- **Zero Configuration**: No user setup during addon installation
+- **Tenant Identification**: Automatic from JWS claims (aid claim)
+- **Credential Delivery**: Client credentials provided during INSTALLED event
+- **Instance Isolation**: Each tenant gets isolated integration instance
 
 ## Development Considerations
 
-### Likely Adaptations for Production
-This reference implementation uses:
-- **SQLite**: Better with production database (PostgreSQL, MySQL, etc.)
-- **Local Storage**: Implement proper secret management
-- **Basic Logging**: Enhance with structured logging and monitoring
-- **Simple UI**: Build production-grade admin interface
-- **Development URLs**: Configure proper production endpoints
+### JWS Validation Implementation
+```php
+// Key validation steps:
+1. Split JWS token into header.payload.signature
+2. Decode header to get algorithm (RS256) and key ID (kid)
+3. Fetch public key from Trados JWKS endpoint
+4. Calculate payload hash (always empty body for Trados)
+5. Verify signature using RSA public key
+6. Validate claims (issuer, audience, expiration)
+```
 
 ### Security Enhancements for Production
-- Remove hardcoded fallback values in HMAC functions
-- Add rate limiting and DDoS protection on API endpoints
-- Implement comprehensive error handling and structured logging
-- Add monitoring and alerting systems for security events
+- Implement proper JWS token caching and key rotation
+- Add comprehensive logging for JWS validation failures
+- Implement rate limiting on webhook endpoints
+- Add monitoring for signature validation metrics
 - Use proper HTTPS certificates and TLS configuration
 - Implement database backup and disaster recovery procedures
-- Add API key rotation policies and automated expiration
-- Implement proper input validation and sanitization
 - Add request size limits and timeout configurations
+- Implement proper input validation and sanitization
 
 ## Reference Implementation Features
 
 ### Dashboard Features
-- API key generation and management for testing
-- Multi-tenant integration instance tracking
-- Activity audit trails for debugging
-- Real-time monitoring during development
+- Automatic tenant integration tracking
+- JWS authentication status monitoring
+- Activity audit trails with signature validation logs
+- Real-time webhook event processing
 - System health status indicators
+- Instance credential management (ClientID/Secret viewing)
 
 ### Learning Resources
-- Complete HMAC authentication implementation
+- Complete JWS authentication implementation
 - Trados Cloud addon lifecycle event handling
-- Multi-tenant architecture patterns
-- Security validation examples
-- Database schema design for integrations
+- Multi-tenant architecture with automatic provisioning
+- Security validation examples with detailed logging
+- Database schema design for webhook-driven integrations
 
 ## File Structure
 
@@ -293,65 +346,75 @@ This reference implementation uses:
 ├── Rws.LC.AppBlueprint/          # Trados addon (C#)
 │   ├── Controllers/
 │   │   ├── StandardController.cs # Main lifecycle and integration logic
-│   │   ├── TestWebsiteProxyController.cs # Development proxy
-│   │   └── IntegrationController.cs # Integration endpoints
-│   ├── descriptor.json          # Addon configuration
+│   │   └── WebhookController.cs  # Webhook event handling
+│   ├── descriptor.json          # Addon configuration (no API key required)
 │   └── appsettings.json         # Application settings
-├── provision-instance.php       # Reference provisioning endpoint
+├── v1/
+│   ├── app-lifecycle.php        # Lifecycle event handler
+│   ├── webhooks.php             # Webhook event processor
+│   └── health.php               # Health check endpoint
 ├── includes/
-│   ├── database.php             # Database connection example
-│   └── functions.php            # Reference PHP functions
-└── api/
-    └── get-instance-details.php # Instance details API example
+│   ├── database.php             # Database connection and schema
+│   └── functions.php            # JWS validation and utility functions
+├── index.php                    # Integration dashboard
+└── database-viewer.php          # Database inspection tool
 ```
 
-*Note: This repository contains the addon implementation and reference API examples. Complete dashboard implementation not included.*
-
 ### Key Reference Functions
-- `GetTenantApiKey()`: Retrieving API keys from addon configuration
-- `SendHmacSignedRequestAsync()`: HMAC signature generation and request sending
-- `validateHmacSignature()`: Server-side HMAC signature validation
-- `createIntegrationControl()`: Integration instance provisioning patterns
-- `deactivateInstance()`: Secure instance cleanup patterns
+- `validateJwsSignature()`: Complete JWS signature validation
+- `getTradosPublicKey()`: Fetching and caching Trados public keys
+- `convertJwkToPublicKey()`: Converting JWK format to OpenSSL-compatible PEM
+- `createIntegrationControl()`: Automatic tenant provisioning
+- `logActivity()`: Comprehensive audit logging
 
 ## Testing the Reference Implementation
 
 ### Integration Testing
-1. Generate test API key via dashboard
-2. Install Trados addon with API key in development environment
-3. Verify integration appears in dashboard
+1. Install Trados addon (no configuration required)
+2. Verify automatic integration provisioning in dashboard
+3. Test webhook event processing with JWS validation
 4. Test uninstall flow and verify cleanup
-5. Monitor logs for proper HMAC validation
+5. Monitor logs for proper JWS validation
 
 ### Security Testing
-- Test HMAC signature validation patterns
-- Verify replay attack prevention mechanisms
-- Test unauthorized access scenarios
-- Validate API key isolation between tenants
+- Test JWS signature validation with various scenarios
+- Verify proper handling of expired tokens
+- Test with invalid signatures and malformed tokens
+- Validate tenant isolation between different installations
+- Test webhook replay attack prevention
 
 ## Extending This Reference
 
 ### Common Adaptations
 - Replace SQLite with production database
-- Implement OAuth 2.0 instead of HMAC (see documentation)
-- Add webhook validation for incoming Trados events
-- Implement proper secret management
+- Implement webhook event processing for your use case
 - Add comprehensive error handling and retry logic
 - Build production-grade user interfaces
+- Add monitoring and alerting for JWS validation failures
+- Implement webhook event queuing and processing
 
 ### Integration Patterns to Study
-- Addon descriptor configuration
-- Lifecycle event handling (install/uninstall/update)
-- Configuration validation patterns
-- HMAC signature generation and validation
-- Multi-tenant data isolation
+- JWS signature validation with public key cryptography
+- Addon descriptor configuration (zero user configuration)
+- Lifecycle event handling (install/uninstall)
+- Webhook event processing with authentication
+- Multi-tenant data isolation with automatic provisioning
 - Real-time monitoring and logging
+
+## Migration from API Key Authentication
+
+If you're migrating from API key-based authentication:
+
+1. **Remove API Key Configuration**: Update descriptor.json to remove API key requirements
+2. **Implement JWS Validation**: Replace HMAC validation with JWS signature verification
+3. **Update Provisioning Logic**: Remove API key dependency, use automatic tenant identification
+4. **Simplify User Experience**: No configuration screens needed during installation
 
 ## Contributing
 
 This is a reference implementation for educational purposes. Contributions that improve:
+- JWS validation patterns and security
 - Code clarity and documentation
-- Security pattern examples
 - Integration pattern demonstrations
 - Educational value for developers
 
@@ -360,5 +423,5 @@ Are welcome.
 ## Resources
 
 - [Trados Cloud Extensibility Documentation](https://eu.cloud.trados.com/lc/extensibility-docs)
-- [HMAC Authentication Best Practices](https://tools.ietf.org/html/rfc2104)
-
+- [JSON Web Signature (JWS) RFC 7515](https://tools.ietf.org/html/rfc7515)
+- [JSON Web Key (JWK) RFC 7517](https://tools.ietf.org/html/rfc7517)

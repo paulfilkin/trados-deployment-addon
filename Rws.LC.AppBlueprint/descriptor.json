@@ -1,7 +1,7 @@
 ﻿{
   "name": "Trados Deployment Addon",
-  "version": "1.0.1",
-  "description": "Trados Deployment Addon for testing deployment and credential management",
+  "version": "1.1.2",
+  "description": "Trados Deployment Addon for testing deployment and credential management with webhook support",
   "extensions": [],
   "standardEndpoints": {
     "health": "/v1/health",
@@ -12,19 +12,17 @@
     "privacyPolicy": "/v1/privacyPolicy",
     "termsAndConditions": "/v1/termsAndConditions"
   },
-  "configurations": [
+  "webhooks": [
     {
-      "name": "API Key",
-      "id": "API_KEY",
-      "description": "The API key provided by your integration provider for secure authentication",
-      "optional": false,
-      "dataType": "string",
-      "defaultValue": "",
-      "isSecret": true
+      "url": "/v1/webhooks",
+      "eventTypes": [
+        { "eventType": "PROJECT.TASK.CREATED" }
+      ]
     }
   ],
-  "releaseNotes": "Initial deployment test version",
-  "minimumVersion": "1.0.1",
+  "configurations": [],
+  "releaseNotes": "Removed API key configuration - authentication now handled entirely through JWS tokens",
+  "minimumVersion": "1.1.2",
   "vendor": {
     "name": "Paul Filkin",
     "url": "https://multifarious.filkin.com",

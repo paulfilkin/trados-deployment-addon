@@ -5,8 +5,6 @@ VisualStudioVersion = 17.0.32014.148
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Rws.LC.AppBlueprint", "Rws.LC.AppBlueprint\Rws.LC.AppBlueprint.csproj", "{4EE985BB-5B32-4953-973F-0A60D394AA95}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rws.LC.AppBlueprint.Test", "Rws.LC.AppBlueprint.Test\Rws.LC.AppBlueprint.Test.csproj", "{AABB4130-813D-4302-A2D3-A4AC9038B18B}"
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"
 EndProject
 Global
@@ -19,10 +17,6 @@ Global
 		{4EE985BB-5B32-4953-973F-0A60D394AA95}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4EE985BB-5B32-4953-973F-0A60D394AA95}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4EE985BB-5B32-4953-973F-0A60D394AA95}.Release|Any CPU.Build.0 = Release|Any CPU
-		{AABB4130-813D-4302-A2D3-A4AC9038B18B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{AABB4130-813D-4302-A2D3-A4AC9038B18B}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{AABB4130-813D-4302-A2D3-A4AC9038B18B}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{AABB4130-813D-4302-A2D3-A4AC9038B18B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

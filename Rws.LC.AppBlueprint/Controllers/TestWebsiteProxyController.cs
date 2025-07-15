@@ -11,7 +11,7 @@ namespace Rws.LC.AppBlueprint.Controllers
 {
     /// <summary>
     /// Simple proxy controller for routing test website requests to XAMPP
-    /// This only exists for integration testing
+    /// This forwards JWS-authenticated requests from Trados to the PHP endpoints
     /// </summary>
     [Route("trados-integration")]
     [ApiController]
@@ -28,7 +28,7 @@ namespace Rws.LC.AppBlueprint.Controllers
         }
 
         /// <summary>
-        /// Proxy all requests under /trados-integration/ to XAMPP
+        /// Proxy all requests under /trados-integration/ to XAMPP with JWS authentication
         /// </summary>
         [HttpGet]
         [HttpPost]
@@ -60,35 +60,60 @@ namespace Rws.LC.AppBlueprint.Controllers
                     requestMessage.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 }
 
-                // Copy important headers - ADD HMAC HEADERS
-                if (Request.Headers.ContainsKey("X-Signature"))
-                    requestMessage.Headers.Add("X-Signature", Request.Headers["X-Signature"].ToString());
-                if (Request.Headers.ContainsKey("X-Timestamp"))
-                    requestMessage.Headers.Add("X-Timestamp", Request.Headers["X-Timestamp"].ToString());
-                if (Request.Headers.ContainsKey("X-Nonce"))
-                    requestMessage.Headers.Add("X-Nonce", Request.Headers["X-Nonce"].ToString());
+                // Forward JWS authentication headers (CRITICAL - this is the main fix!)
+                string jwsSignature = null;
 
-                // ADD THESE LINES FOR HMAC:
-                if (Request.Headers.ContainsKey("X-HMAC-Signature"))
-                    requestMessage.Headers.Add("X-HMAC-Signature", Request.Headers["X-HMAC-Signature"].ToString());
-                if (Request.Headers.ContainsKey("Authorization"))
-                    requestMessage.Headers.Add("Authorization", Request.Headers["Authorization"].ToString());
+                // Get the JWS signature (check different case variations)
+                if (Request.Headers.ContainsKey("x-lc-signature"))
+                {
+                    jwsSignature = Request.Headers["x-lc-signature"].ToString();
+                    _logger.LogInformation("Found JWS signature: x-lc-signature");
+                }
+                else if (Request.Headers.ContainsKey("X-LC-Signature"))
+                {
+                    jwsSignature = Request.Headers["X-LC-Signature"].ToString();
+                    _logger.LogInformation("Found JWS signature: X-LC-Signature");
+                }
+                else if (Request.Headers.ContainsKey("X-Lc-Signature"))
+                {
+                    jwsSignature = Request.Headers["X-Lc-Signature"].ToString();
+                    _logger.LogInformation("Found JWS signature: X-Lc-Signature");
+                }
 
-                // Also copy all headers that start with X-
+                // Forward the JWS signature (only once!)
+                if (!string.IsNullOrEmpty(jwsSignature))
+                {
+                    requestMessage.Headers.Add("x-lc-signature", jwsSignature);
+                    _logger.LogInformation("Forwarding JWS signature to PHP");
+                }
+                else
+                {
+                    _logger.LogWarning("No JWS signature found in request headers");
+                }
+
+                // Forward other important headers
+                if (Request.Headers.ContainsKey("X-Forwarded-For"))
+                    requestMessage.Headers.Add("X-Forwarded-For", Request.Headers["X-Forwarded-For"].ToString());
+                if (Request.Headers.ContainsKey("X-Forwarded-Host"))
+                    requestMessage.Headers.Add("X-Forwarded-Host", Request.Headers["X-Forwarded-Host"].ToString());
+                if (Request.Headers.ContainsKey("X-Forwarded-Proto"))
+                    requestMessage.Headers.Add("X-Forwarded-Proto", Request.Headers["X-Forwarded-Proto"].ToString());
+
+                // Forward any other X- headers (but prioritize JWS)
                 foreach (var header in Request.Headers)
                 {
-                    if (header.Key.StartsWith("X-", StringComparison.OrdinalIgnoreCase))
+                    if (header.Key.StartsWith("X-", StringComparison.OrdinalIgnoreCase) &&
+                        !header.Key.Equals("x-lc-signature", StringComparison.OrdinalIgnoreCase) &&
+                        !header.Key.Equals("X-LC-Signature", StringComparison.OrdinalIgnoreCase) &&
+                        !requestMessage.Headers.Contains(header.Key))
                     {
-                        if (!requestMessage.Headers.Contains(header.Key))
+                        try
                         {
-                            try
-                            {
-                                requestMessage.Headers.Add(header.Key, header.Value.ToString());
-                            }
-                            catch
-                            {
-                                // Some headers might not be allowed, skip them
-                            }
+                            requestMessage.Headers.Add(header.Key, header.Value.ToString());
+                        }
+                        catch
+                        {
+                            // Some headers might not be allowed, skip them
                         }
                     }
                 }

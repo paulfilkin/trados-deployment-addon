@@ -48,6 +48,10 @@ namespace Rws.LC.AppBlueprint.Controllers
         /// </summary>
         private readonly IHealthReporter _healthReporter;
 
+        /// <summary>
+        /// HTTP client factory for making requests
+        /// </summary>
+        private readonly IHttpClientFactory _httpClientFactory;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="StandardController"/> class.
@@ -57,17 +61,20 @@ namespace Rws.LC.AppBlueprint.Controllers
         /// <param name="descriptorService">The descriptor service.</param>
         /// <param name="accountService">The account service.</param>
         /// <param name="healthReporter">The health reporter.</param>
+        /// <param name="httpClientFactory">The HTTP client factory.</param>
         public StandardController(IConfiguration configuration,
             ILogger<StandardController> logger,
             IDescriptorService descriptorService,
             IAccountService accountService,
-            IHealthReporter healthReporter)
+            IHealthReporter healthReporter,
+            IHttpClientFactory httpClientFactory)
         {
             _configuration = configuration;
             _logger = logger;
             _descriptorService = descriptorService;
             _accountService = accountService;
             _healthReporter = healthReporter;
+            _httpClientFactory = httpClientFactory;
         }
 
         /// <summary>
@@ -293,12 +300,21 @@ namespace Rws.LC.AppBlueprint.Controllers
             var html = System.IO.File.ReadAllText(@"./resources/termsAndConditions.html");
             return base.Content(html, "text/html");
         }
+
         /// <summary>
         /// Automatically sets up integration with external provisioning system
         /// </summary>
         /// <param name="tenantId">The tenant ID for the installation</param>
         private async Task SetupIntegrationAsync(string tenantId)
         {
+            // DEBUG: Log all incoming headers
+            _logger.LogInformation("=== DEBUG: All incoming headers from Trados ===");
+            foreach (var header in HttpContext.Request.Headers)
+            {
+                _logger.LogInformation("Incoming Header: {Key} = {Value}", header.Key, header.Value.ToString());
+            }
+            _logger.LogInformation("=== END DEBUG ===");
+
             _logger.LogInformation("Setting up integration for tenant {TenantId}", tenantId);
 
             // Get stored credentials for this installation
@@ -312,7 +328,7 @@ namespace Rws.LC.AppBlueprint.Controllers
             // Prepare provisioning request
             var provisioningData = new
             {
-                tenantId = tenantId,  // ← CORRECT: matches PHP expectation
+                accountId = tenantId,  // Changed from tenantId to accountId to match Trados standard
                 clientCredentials = new
                 {
                     clientId = credentials.ClientId,
@@ -333,8 +349,8 @@ namespace Rws.LC.AppBlueprint.Controllers
 
             _logger.LogInformation("Calling integration endpoint: {Url}", integrationUrl);
 
-            // Send HMAC-signed request
-            var result = await SendHmacSignedRequestAsync(integrationUrl, provisioningData);
+            // Send JWS-signed request (forward the original JWS from Trados)
+            var result = await SendJwsSignedRequestAsync(integrationUrl, provisioningData);
 
             if (result.Success)
             {
@@ -354,39 +370,33 @@ namespace Rws.LC.AppBlueprint.Controllers
         }
 
         /// <summary>
-        /// Sends HMAC-signed request to external provisioning system
+        /// Sends JWS-signed request to external provisioning system by forwarding the original JWS from Trados
         /// </summary>
-        private async Task<IntegrationResult> SendHmacSignedRequestAsync(string url, object data)
+        private async Task<IntegrationResult> SendJwsSignedRequestAsync(string url, object data)
         {
-            using var httpClient = new HttpClient();
+            using var httpClient = _httpClientFactory.CreateClient();
 
             var payload = JsonSerializer.Serialize(data, JsonSettings.Default());
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = Guid.NewGuid().ToString("N")[..16]; // First 16 chars of GUID
 
-            // Get API key from tenant configuration instead of hardcoded secret
-            var tenantId = HttpContext.User?.GetTenantId();
-            var apiKey = await GetTenantApiKey(tenantId);
-
-            if (string.IsNullOrEmpty(apiKey))
-            {
-                throw new InvalidOperationException("API Key not configured. Please configure the API Key in the addon settings.");
-            }
-
-            // Create HMAC signature using the configured API key
-            var signatureData = payload + timestamp + nonce;
-            var signature = CreateHmacSignature(signatureData, apiKey);
-
-            _logger.LogInformation("Sending HMAC request to {Url} with API key configured", url);
+            _logger.LogInformation("Sending JWS request to {Url} using original Trados authentication", url);
 
             var request = new HttpRequestMessage(HttpMethod.Post, url)
             {
                 Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json")
             };
 
-            request.Headers.Add("X-Signature", signature);
-            request.Headers.Add("X-Timestamp", timestamp.ToString());
-            request.Headers.Add("X-Nonce", nonce);
+            // Forward the original JWS signature from Trados
+            var jwsSignature = HttpContext.Request.Headers["x-lc-signature"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(jwsSignature))
+            {
+                request.Headers.Add("x-lc-signature", jwsSignature);
+                _logger.LogInformation("Forwarding JWS signature from Trados");
+            }
+            else
+            {
+                _logger.LogWarning("No JWS signature found in request headers");
+                throw new InvalidOperationException("Missing JWS signature from Trados request");
+            }
 
             var response = await httpClient.SendAsync(request);
             var responseContent = await response.Content.ReadAsStringAsync();
@@ -402,10 +412,8 @@ namespace Rws.LC.AppBlueprint.Controllers
                 return new IntegrationResult
                 {
                     Success = root.GetProperty("success").GetBoolean(),
-                    InstanceId = root.TryGetProperty("instance_id", out var instanceId) ? instanceId.GetString() : null,
-                    WebhookUrl = root.TryGetProperty("webhook_config", out var webhookConfig) &&
-                               webhookConfig.TryGetProperty("webhook_url", out var webhookUrl) ?
-                               webhookUrl.GetString() : null,
+                    InstanceId = root.TryGetProperty("instanceId", out var instanceId) ? instanceId.GetString() : null,
+                    WebhookUrl = root.TryGetProperty("webhookEndpoint", out var webhookUrl) ? webhookUrl.GetString() : null,
                     Error = root.TryGetProperty("error", out var error) ? error.GetString() : null
                 };
             }
@@ -419,70 +427,6 @@ namespace Rws.LC.AppBlueprint.Controllers
             }
         }
 
-        ///// <summary>
-        ///// Gets the API key from tenant configuration
-        ///// </summary>
-        //private async Task<string> GetTenantApiKey(string tenantId)
-        //{
-        //    try
-        //    {
-        //        var configSettings = await _accountService.GetConfigurationSettings(tenantId, CancellationToken.None);
-        //        var apiKeySetting = configSettings?.Items?.FirstOrDefault(c => c.Id == "API_KEY");
-        //        return apiKeySetting?.Value?.ToString();
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        _logger.LogError(ex, "Failed to retrieve API key for tenant {TenantId}", tenantId);
-        //        return null;
-        //    }
-        //}
-
-        /// <summary>
-        /// Gets the API key from tenant configuration
-        /// </summary>
-        private async Task<string> GetTenantApiKey(string tenantId)
-        {
-            try
-            {
-                _logger.LogInformation("Attempting to get API key for tenant {TenantId}", tenantId);
-
-                var configSettings = await _accountService.GetConfigurationSettings(tenantId, CancellationToken.None);
-
-                _logger.LogInformation("Config settings retrieved. ItemCount: {Count}", configSettings?.ItemCount ?? 0);
-
-                if (configSettings?.Items != null)
-                {
-                    foreach (var item in configSettings.Items)
-                    {
-                        _logger.LogInformation("Config item: Id={Id}, Value={Value}", item.Id, item.Value?.ToString()?.Substring(0, Math.Min(10, item.Value?.ToString()?.Length ?? 0)) + "...");
-                    }
-                }
-
-                var apiKeySetting = configSettings?.Items?.FirstOrDefault(c => c.Id == "API_KEY");
-                var apiKey = apiKeySetting?.Value?.ToString();
-
-                _logger.LogInformation("API key found: {Found}, Value length: {Length}",
-                    !string.IsNullOrEmpty(apiKey), apiKey?.Length ?? 0);
-
-                return apiKey;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to retrieve API key for tenant {TenantId}", tenantId);
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Creates HMAC-SHA256 signature
-        /// </summary>
-        private static string CreateHmacSignature(string data, string secret)
-        {
-            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secret));
-            var hash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(data));
-            return Convert.ToHexString(hash).ToLowerInvariant();
-        }
-
         /// <summary>
         /// Notifies the PHP system about addon uninstall
         /// </summary>
@@ -493,7 +437,7 @@ namespace Rws.LC.AppBlueprint.Controllers
 
             var provisioningData = new
             {
-                tenantId = tenantId,
+                accountId = tenantId,  // Changed from tenantId to accountId
                 clientCredentials = new
                 {
                     clientId = credentials.ClientId ?? "uninstall_placeholder",
@@ -512,41 +456,30 @@ namespace Rws.LC.AppBlueprint.Controllers
         }
 
         /// <summary>
-        /// Sends uninstall request with HMAC authentication
+        /// Sends uninstall request with JWS authentication
         /// </summary>
         private async Task SendUninstallRequestAsync(string url, object data)
         {
-            using var httpClient = new HttpClient();
+            using var httpClient = _httpClientFactory.CreateClient();
             var payload = JsonSerializer.Serialize(data, JsonSettings.Default());
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = Guid.NewGuid().ToString("N")[..16]; // First 16 chars of GUID
 
-            // Get API key for HMAC signing (we still have it during uninstall)
-            var tenantId = HttpContext.User?.GetTenantId();
-            var apiKey = await GetTenantApiKey(tenantId);
-
-            if (string.IsNullOrEmpty(apiKey))
-            {
-                // Fallback: try to get API key from the database before removal
-                _logger.LogWarning("No API key in configuration during uninstall, attempting database lookup");
-                // For now, we'll throw an error - we need the API key for security
-                throw new InvalidOperationException("Cannot authenticate uninstall request - API key not available");
-            }
-
-            // Create HMAC signature using the API key
-            var signatureData = payload + timestamp + nonce;
-            var signature = CreateHmacSignature(signatureData, apiKey);
-
-            _logger.LogInformation("Sending HMAC-authenticated uninstall request");
+            _logger.LogInformation("Sending JWS-authenticated uninstall request");
 
             var request = new HttpRequestMessage(HttpMethod.Post, url)
             {
                 Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json")
             };
 
-            request.Headers.Add("X-Signature", signature);
-            request.Headers.Add("X-Timestamp", timestamp.ToString());
-            request.Headers.Add("X-Nonce", nonce);
+            // Forward the original JWS signature from Trados
+            var jwsSignature = HttpContext.Request.Headers["x-lc-signature"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(jwsSignature))
+            {
+                request.Headers.Add("x-lc-signature", jwsSignature);
+            }
+            else
+            {
+                throw new InvalidOperationException("Cannot authenticate uninstall request - JWS signature not available");
+            }
 
             var response = await httpClient.SendAsync(request);
             var responseContent = await response.Content.ReadAsStringAsync();
